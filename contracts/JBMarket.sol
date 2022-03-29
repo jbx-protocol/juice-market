@@ -2,10 +2,9 @@
 pragma solidity 0.8.6;
 
 import '@openzeppelin/contracts/security/ReentrancyGuard.sol';
-import '@jbx-protocol/contracts-v2/contracts/interfaces/IJBSplitsStore.sol';
+import '@openzeppelin/contracts/access/Ownable.sol';
 import '@jbx-protocol/contracts-v2/contracts/libraries/JBConstants.sol';
 import '@jbx-protocol/contracts-v2/contracts/libraries/JBTokens.sol';
-import '@jbx-protocol/contracts-v2/contracts/JBETHERC20ProjectPayer.sol';
 import '@openzeppelin/contracts/utils/Address.sol';
 import '@paulrberg/contracts/math/PRBMath.sol';
 
@@ -22,9 +21,22 @@ error INSUFFICIENT_AMOUNT();
 error UNKOWN_COLLECTION();
 error EMPTY_COLLECTION();
 error TERMINAL_IN_SPLIT_ZERO_ADDRESS();
+error TERMINAL_NOT_FOUND();
+error FEE_TOO_HIGH();
 
-contract JBMarket is IJBMarket, JBETHERC20ProjectPayer, ReentrancyGuard {
-  event Settle(IERC721 indexed collection, uint256 indexed itemId, address caller);
+contract JBMarket is IJBMarket, Ownable, ReentrancyGuard {
+  //*********************************************************************//
+  // --------------------- private stored constants -------------------- //
+  //*********************************************************************//
+
+  /**
+    @notice
+    Maximum fee that can be set for a funding cycle configuration.
+
+    @dev
+    Out of MAX_FEE (50_000_000 / 1_000_000_000)
+  */
+  uint256 private constant _FEE_CAP = 50_000_000;
 
   //*********************************************************************//
   // ---------------- public immutable stored properties --------------- //
@@ -32,9 +44,15 @@ contract JBMarket is IJBMarket, JBETHERC20ProjectPayer, ReentrancyGuard {
 
   /**
     @notice
+    The directory of terminals and controllers for projects.
+  */
+  IJBDirectory public immutable override directory;
+
+  /**
+    @notice
     The contract that stores splits for each project.
   */
-  IJBSplitsStore public immutable splitsStore;
+  IJBSplitsStore public immutable override splitsStore;
 
   /**
     @notice
@@ -73,6 +91,15 @@ contract JBMarket is IJBMarket, JBETHERC20ProjectPayer, ReentrancyGuard {
   */
   mapping(IERC721 => mapping(uint256 => address)) public override ownerOfPendingSettlement;
 
+  /**
+    @notice
+    The market fee percent.
+
+    @dev
+    Out of MAX_FEE (25_000_000 / 1_000_000_000)
+  */
+  uint256 public override fee = 25_000_000; // 2.5%
+
   //*********************************************************************//
   // -------------------------- constructor ---------------------------- //
   //*********************************************************************//
@@ -81,15 +108,24 @@ contract JBMarket is IJBMarket, JBETHERC20ProjectPayer, ReentrancyGuard {
     @param _projectId The ID of the project that should receive market fees.
     @param _splitsStore A contract that stores splits for each project.
     @param _directory A contract storing directories of terminals and controllers for each project.
+    @param _owner The address that will own this contract.
   */
   constructor(
     uint256 _projectId,
     IJBSplitsStore _splitsStore,
-    IJBDirectory _directory
-  ) JBETHERC20ProjectPayer(0, payable(address(0)), false, '', bytes(''), _directory, address(0)) {
+    IJBDirectory _directory,
+    address _owner
+  ) {
     projectId = _projectId;
+    directory = _directory;
     splitsStore = _splitsStore;
+
+    _transferOwnership(_owner);
   }
+
+  //*********************************************************************//
+  // --------------------- external transactions ----------------------- //
+  //*********************************************************************//
 
   /**
     @notice 
@@ -219,6 +255,25 @@ contract JBMarket is IJBMarket, JBETHERC20ProjectPayer, ReentrancyGuard {
     emit Delist(_collection, _itemId, msg.sender);
   }
 
+  /**
+    @notice
+    Allows the fee to be updated.
+
+    @dev
+    Only the owner of this contract can change the fee.
+
+    @param _fee The new fee, out of MAX_FEE.
+  */
+  function setFee(uint256 _fee) external virtual override onlyOwner {
+    // The provided fee must be within the max.
+    if (_fee > _FEE_CAP) revert FEE_TOO_HIGH();
+
+    // Store the new fee.
+    fee = _fee;
+
+    emit SetFee(_fee, msg.sender);
+  }
+
   //*********************************************************************//
   // --------------------- private helper functions -------------------- //
   //*********************************************************************//
@@ -237,8 +292,11 @@ contract JBMarket is IJBMarket, JBETHERC20ProjectPayer, ReentrancyGuard {
     // Can't settle if there's nothing to settle.
     if (_pendingSettleAmount == 0) revert NOTHING_TO_SETTLE();
 
-    // Set the leftover amount to the initial amount.
-    uint256 _leftoverAmount = _pendingSettleAmount;
+    // Get the fee amount;
+    uint256 _fee = fee == 0 ? 0 : _feeAmount(_pendingSettleAmount);
+
+    // Set the leftover amount to the initial amount minus the fee.
+    uint256 _leftoverAmount = _pendingSettleAmount - _fee;
 
     // Get a reference to the item's settlement splits.
     JBSplit[] memory _splits = splitsStore.splitsOf(
@@ -275,16 +333,34 @@ contract JBMarket is IJBMarket, JBETHERC20ProjectPayer, ReentrancyGuard {
           _split.allocator.allocate{value: _settleAmount}(_data);
           // Otherwise, if a project is specified, make a payment to it.
         } else if (_split.projectId != 0) {
-          _pay(
+          // Find the terminal for this contract's project.
+          IJBPaymentTerminal _terminal = directory.primaryTerminalOf(
             _split.projectId,
-            JBTokens.ETH,
-            _settleAmount,
-            _split.beneficiary,
-            0,
-            _split.preferClaimed,
-            '',
-            bytes('')
+            JBTokens.ETH
           );
+
+          // There must be a terminal.
+          if (_terminal == IJBPaymentTerminal(address(0))) revert TERMINAL_NOT_FOUND();
+
+          // Pay if there's a beneficiary to receive tokens.
+          if (_split.beneficiary != address(0))
+            // Send funds to the terminal.
+            _terminal.pay{value: _settleAmount}(
+              0, // ignored.
+              _split.projectId,
+              _split.beneficiary,
+              0,
+              _split.preferClaimed,
+              '',
+              bytes('')
+            );
+            // Otherwise just add to balance so tokens don't get issued.
+          else
+            _terminal.addToBalanceOf{value: _settleAmount}(
+              _split.projectId,
+              0, // ignored
+              ''
+            );
         } else {
           // If there's a beneficiary, send the funds directly to the beneficiary. Otherwise send to the msg.sender.
           Address.sendValue(
@@ -301,6 +377,9 @@ contract JBMarket is IJBMarket, JBETHERC20ProjectPayer, ReentrancyGuard {
 
     // The address who received the item whose purchase is being settled.
     address _ownerOfPendingSettlement = ownerOfPendingSettlement[_collection][_itemId];
+
+    // Take the fee.
+    if (_fee > 0) _takeFee(_fee, _ownerOfPendingSettlement);
 
     // Send any leftover amount to the owner to who received the purchased item.
     if (_leftoverAmount > 0) Address.sendValue(payable(_ownerOfPendingSettlement), _leftoverAmount);
@@ -319,5 +398,45 @@ contract JBMarket is IJBMarket, JBETHERC20ProjectPayer, ReentrancyGuard {
       _leftoverAmount,
       msg.sender
     );
+  }
+
+  /**
+    @notice
+    Takes a fee into the platform's project, which has an id of _PROTOCOL_PROJECT_ID.
+
+    @param _fee The amount of the fee to take, as a floating point number with 18 decimals.
+    @param _beneficiary The address to mint the platforms tokens for.
+  */
+  function _takeFee(uint256 _fee, address _beneficiary) private {
+    _processFee(_fee, _beneficiary); // Take the fee.
+  }
+
+  /** 
+    @notice 
+    Returns the fee amount based on the provided amount for the specified project.
+
+    @param _amount The amount that the fee is based on, as a fixed point number with the same amount of decimals as this terminal.
+
+    @return The amount of the fee, as a fixed point number with the same amount of decimals as this terminal.
+  */
+  function _feeAmount(uint256 _amount) private view returns (uint256) {
+    // The amount of tokens from the `_amount` to pay as a fee.
+    return _amount - PRBMath.mulDiv(_amount, JBConstants.MAX_FEE, fee + JBConstants.MAX_FEE);
+  }
+
+  /**
+    @notice
+    Process a fee of the specified amount.
+
+    @param _amount The fee amount, as a floating point number with 18 decimals.
+    @param _beneficiary The address to mint the platform's tokens for.
+  */
+
+  function _processFee(uint256 _amount, address _beneficiary) private {
+    // Get the terminal for the protocol project.
+    IJBPaymentTerminal _terminal = directory.primaryTerminalOf(projectId, JBTokens.ETH);
+
+    // Send the payment.
+    _terminal.pay{value: _amount}(_amount, projectId, _beneficiary, 0, false, '', bytes('')); // Use the external pay call of the correct terminal.
   }
 }

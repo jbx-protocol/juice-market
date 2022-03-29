@@ -2,6 +2,7 @@
 pragma solidity 0.8.6;
 
 import '@openzeppelin/contracts/token/ERC721/IERC721.sol';
+import '@jbx-protocol/contracts-v2/contracts/interfaces/IJBSplitsStore.sol';
 import '../structs/JBCollectionItem.sol';
 
 interface IJBMarket {
@@ -40,6 +41,12 @@ interface IJBMarket {
     address caller
   );
 
+  event SetFee(uint256 fee, address caller);
+
+  function splitsStore() external view returns (IJBSplitsStore);
+
+  function directory() external view returns (IJBDirectory);
+
   function minPrice(IERC721 _collection, uint256 _itemId) external returns (uint256);
 
   function pendingSettleAmount(IERC721 _collection, uint256 _itemId) external returns (uint256);
@@ -47,6 +54,10 @@ interface IJBMarket {
   function ownerOfPendingSettlement(IERC721 _collection, uint256 _itemId)
     external
     returns (address);
+
+  function fee() external view returns (uint256);
+
+  function setFee(uint256 _fee) external;
 
   function list(
     IERC721 _collection,
