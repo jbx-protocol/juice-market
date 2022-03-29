@@ -206,13 +206,14 @@ contract JBMarket is IJBMarket, Ownable, ReentrancyGuard {
     // Can't buy if sent amount is less than the minimum.
     if (_minPrice > msg.value) revert INSUFFICIENT_AMOUNT();
 
-    // Set the amount to be settled as a result of the purchase.
-    pendingSettleAmount[_collection][_itemId] = msg.value;
+    if (_shouldSettle) _settle(_collection, _itemId, msg.value, _beneficiary);
+    else {
+      // Set the amount to be settled as a result of the purchase.
+      pendingSettleAmount[_collection][_itemId] = msg.value;
 
-    // Set the owner to whom the benenficiary of the sale.
-    ownerOfPendingSettlement[_collection][_itemId] = _beneficiary;
-
-    if (_shouldSettle) _settle(_collection, _itemId);
+      // Set the owner to whom the benenficiary of the sale.
+      ownerOfPendingSettlement[_collection][_itemId] = _beneficiary;
+    }
 
     // Transfer the item.
     _collection.safeTransferFrom(address(this), _beneficiary, _itemId);
@@ -228,7 +229,23 @@ contract JBMarket is IJBMarket, Ownable, ReentrancyGuard {
     @param _itemId The ID of the sold item whose purchase is being settled.
   */
   function settle(IERC721 _collection, uint256 _itemId) external override nonReentrant {
-    _settle(_collection, _itemId);
+    // Get the amount to settle.
+    uint256 _amount = pendingSettleAmount[_collection][_itemId];
+
+    // Get the beneficiary of any leftover amount once splits are settled.
+    address _leftoverBeneficiary = ownerOfPendingSettlement[_collection][_itemId];
+
+    // Can't settle if there's nothing to settle.
+    if (_amount == 0) revert NOTHING_TO_SETTLE();
+
+    // Settle.
+    _settle(_collection, _itemId, _amount, _leftoverBeneficiary);
+
+    // Reset the pending settlement amount for the item now that it's been settled.
+    pendingSettleAmount[_collection][_itemId] = 0;
+
+    // Reset the owner of the pending settlement amount for the item now that it's been settled.
+    ownerOfPendingSettlement[_collection][_itemId] = address(0);
   }
 
   /** 
@@ -284,19 +301,20 @@ contract JBMarket is IJBMarket, Ownable, ReentrancyGuard {
 
     @param _collection The collection from which a sale is being settled.
     @param _itemId The ID of the sold item whose purchase is being settled.
+    @param _amount The amount to settle. 
+    @param _leftoverBeneficiary The address who should be the benficiary of any leftover amount once split's are settled. 
   */
-  function _settle(IERC721 _collection, uint256 _itemId) private {
-    // Get a reference to the amount of the settlement.
-    uint256 _pendingSettleAmount = pendingSettleAmount[_collection][_itemId];
-
-    // Can't settle if there's nothing to settle.
-    if (_pendingSettleAmount == 0) revert NOTHING_TO_SETTLE();
-
+  function _settle(
+    IERC721 _collection,
+    uint256 _itemId,
+    uint256 _amount,
+    address _leftoverBeneficiary
+  ) private {
     // Get the fee amount;
-    uint256 _fee = fee == 0 ? 0 : _feeAmount(_pendingSettleAmount);
+    uint256 _fee = fee == 0 ? 0 : _feeAmount(_amount);
 
     // Set the leftover amount to the initial amount minus the fee.
-    uint256 _leftoverAmount = _pendingSettleAmount - _fee;
+    uint256 _leftoverAmount = _amount - _fee;
 
     // Get a reference to the item's settlement splits.
     JBSplit[] memory _splits = splitsStore.splitsOf(
@@ -312,7 +330,7 @@ contract JBMarket is IJBMarket, Ownable, ReentrancyGuard {
 
       // The amount to send towards the split.
       uint256 _settleAmount = PRBMath.mulDiv(
-        _pendingSettleAmount,
+        _amount,
         _split.percent,
         JBConstants.SPLITS_TOTAL_PERCENT
       );
@@ -375,29 +393,13 @@ contract JBMarket is IJBMarket, Ownable, ReentrancyGuard {
       emit SettleToSplit(_collection, _itemId, _split, _settleAmount, msg.sender);
     }
 
-    // The address who received the item whose purchase is being settled.
-    address _ownerOfPendingSettlement = ownerOfPendingSettlement[_collection][_itemId];
-
     // Take the fee.
-    if (_fee > 0) _takeFee(_fee, _ownerOfPendingSettlement);
+    if (_fee > 0) _takeFee(_fee, _leftoverBeneficiary);
 
     // Send any leftover amount to the owner to who received the purchased item.
-    if (_leftoverAmount > 0) Address.sendValue(payable(_ownerOfPendingSettlement), _leftoverAmount);
+    if (_leftoverAmount > 0) Address.sendValue(payable(_leftoverBeneficiary), _leftoverAmount);
 
-    // Reset the pending settlement amount for the item now that it's been settled.
-    pendingSettleAmount[_collection][_itemId] = 0;
-
-    // Reset the owner of the pending settlement amount for the item now that it's been settled.
-    ownerOfPendingSettlement[_collection][_itemId] = address(0);
-
-    emit Settle(
-      _collection,
-      _itemId,
-      _ownerOfPendingSettlement,
-      _pendingSettleAmount,
-      _leftoverAmount,
-      msg.sender
-    );
+    emit Settle(_collection, _itemId, _leftoverBeneficiary, _amount, _leftoverAmount, msg.sender);
   }
 
   /**
