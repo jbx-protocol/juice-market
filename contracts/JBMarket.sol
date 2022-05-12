@@ -5,6 +5,7 @@ import '@openzeppelin/contracts/security/ReentrancyGuard.sol';
 import '@openzeppelin/contracts/access/Ownable.sol';
 import '@jbx-protocol/contracts-v2/contracts/libraries/JBConstants.sol';
 import '@jbx-protocol/contracts-v2/contracts/libraries/JBTokens.sol';
+import '@jbx-protocol/contracts-v2/contracts/JBETHERC20SplitsPayer.sol';
 import '@openzeppelin/contracts/utils/Address.sol';
 import '@paulrberg/contracts/math/PRBMath.sol';
 
@@ -23,8 +24,9 @@ error EMPTY_COLLECTION();
 error TERMINAL_IN_SPLIT_ZERO_ADDRESS();
 error TERMINAL_NOT_FOUND();
 error FEE_TOO_HIGH();
+error INVALID_AMOUNT();
 
-contract JBMarket is IJBMarket, Ownable, ReentrancyGuard {
+contract JBMarket is IJBMarket, JBETHERC20SplitsPayer {
   //*********************************************************************//
   // --------------------- private stored constants -------------------- //
   //*********************************************************************//
@@ -41,18 +43,6 @@ contract JBMarket is IJBMarket, Ownable, ReentrancyGuard {
   //*********************************************************************//
   // ---------------- public immutable stored properties --------------- //
   //*********************************************************************//
-
-  /**
-    @notice
-    The directory of terminals and controllers for projects.
-  */
-  IJBDirectory public immutable override directory;
-
-  /**
-    @notice
-    The contract that stores splits for each project.
-  */
-  IJBSplitsStore public immutable override splitsStore;
 
   /**
     @notice
@@ -107,20 +97,28 @@ contract JBMarket is IJBMarket, Ownable, ReentrancyGuard {
   /** 
     @param _projectId The ID of the project that should receive market fees.
     @param _splitsStore A contract that stores splits for each project.
-    @param _directory A contract storing directories of terminals and controllers for each project.
     @param _owner The address that will own this contract.
   */
   constructor(
     uint256 _projectId,
     IJBSplitsStore _splitsStore,
-    IJBDirectory _directory,
     address _owner
-  ) {
+  )
+    JBETHERC20SplitsPayer(
+      0,
+      0,
+      0,
+      _splitsStore,
+      0,
+      payable(address(0)),
+      false,
+      '',
+      bytes(''),
+      false,
+      _owner
+    )
+  {
     projectId = _projectId;
-    directory = _directory;
-    splitsStore = _splitsStore;
-
-    _transferOwnership(_owner);
   }
 
   //*********************************************************************//
@@ -132,7 +130,7 @@ contract JBMarket is IJBMarket, Ownable, ReentrancyGuard {
     List an item.
 
     @param _collection The collection from which items are being listed.
-    @param _items The items being listed.
+    @param _items The items being listed. The amount must fit in a uint88.
     @param _memo A memo to pass along to the emitted event.
    **/
   function list(
@@ -140,19 +138,31 @@ contract JBMarket is IJBMarket, Ownable, ReentrancyGuard {
     JBMarketCollectionItem[] calldata _items,
     string calldata _memo
   ) external override nonReentrant {
-    // The collection must contains items.
+    // The collection must exist.
     if (_collection == IERC721(address(0))) revert UNKOWN_COLLECTION();
 
     // The collection must contains items.
     if (_items.length == 0) revert EMPTY_COLLECTION();
 
+    // Get a reference to the number of items.
+    uint256 _numItems = _items.length;
+
     // List each collection item.
-    for (uint256 _i; _i < _items.length; _i++) {
+    for (uint256 _i; _i < _numItems; _i++) {
       // The ID of the collection item.
       uint256 _itemId = _items[_i].id;
 
       // The minimum price the piece should be sold for.
       uint256 _itemMinPrice = _items[_i].minPrice;
+
+      // The amount must fit in a uint88.
+      if (_itemMinPrice > type(uint88).max) revert INVALID_AMOUNT();
+
+      // The token that should be accepted for the sale.
+      address _itemMinPriceToken = _items[_i].minPriceToken;
+
+      // The number of decimals in the token that should be accepted.
+      uint256 _itemMinPriceDecimals = uint256(_items[_i].minPriceDecimals);
 
       // The splits to whom the sale funds should be routable to.
       JBSplit[] memory _splits = _items[_i].splits;
@@ -173,10 +183,27 @@ contract JBMarket is IJBMarket, Ownable, ReentrancyGuard {
       // Set the splits in the store.
       splitsStore.set(projectId, uint256(uint160(address(_collection))), _itemId, _splits);
 
-      // Store the minimum price that the itme should be sold at.
-      minPrice[_collection][_itemId] = _itemMinPrice;
+      {
+        // min price is bits 0-87.
+        uint256 _packedMinPrice = uint88(_items[_i].minPrice);
+        // min price token in bits 88-247.
+        _packedMinPrice |= uint256(uint160(_items[_i].minPriceToken)) << 88;
+        // min price decimals in bits 248-255.
+        _packedMinPrice |= uint256(uint160(_items[_i].minPriceDecimals)) << 248;
+        // Store the minimum price, token, and num decimals that the item should be sold at.
+        minPrice[_collection][_itemId] = _packedMinPrice;
+      }
 
-      emit List(_collection, _itemId, _splits, _itemMinPrice, _memo, msg.sender);
+      emit List(
+        _collection,
+        _itemId,
+        _splits,
+        _itemMinPrice,
+        _itemMinPriceToken,
+        _itemMinPriceDecimals,
+        _memo,
+        msg.sender
+      );
     }
   }
 
@@ -186,6 +213,7 @@ contract JBMarket is IJBMarket, Ownable, ReentrancyGuard {
 
     @param _collection The collection from which an item is being bought.
     @param _itemId The ID of the item being bought.
+    @param _amount The amount being paid, in terms of the token the sale should be made in terms of.
     @param _beneficiary The address to which the item should be sent once bought.
     @param _shouldSettle Whether the purchase should be settled right away.
     @param _memo A memo to pass along to the emitted event.
@@ -193,30 +221,60 @@ contract JBMarket is IJBMarket, Ownable, ReentrancyGuard {
   function buy(
     IERC721 _collection,
     uint256 _itemId,
+    uint256 _amount,
     address _beneficiary,
     bool _shouldSettle,
     string calldata _memo
   ) external payable override nonReentrant {
+    // Get a reference to the packed min price.
+    uint256 _packedMinPrice = minPrice[_collection][_itemId];
+
     // Get a reference to the minimum price that should be accepted.
-    uint256 _minPrice = minPrice[_collection][_itemId];
+    uint256 _minPrice = uint256(uint88(_packedMinPrice));
+
+    // Get a reference to the token that the sale should be accepted in.
+    address _minPriceToken = address(uint160(_packedMinPrice >> 88));
+
+    // ETH shouldn't be sent to this contract if the sale token isn't ETH.
+    if (_minPriceToken != JBTokens.ETH) {
+      if (msg.value > 0) revert NO_MSG_VALUE_ALLOWED();
+
+      // Transfer tokens to this terminal from the msg sender.
+      IERC20(_minPriceToken).transferFrom(msg.sender, payable(address(this)), _amount);
+    }
+    // If the sale token is ETH, override _amount with msg.value.
+    else _amount = msg.value;
 
     // Can't buy if there's no price.
     if (_minPrice == 0) revert NOT_LISTED();
 
     // Can't buy if sent amount is less than the minimum.
-    if (_minPrice > msg.value) revert INSUFFICIENT_AMOUNT();
+    if (_minPrice > _amount) revert INSUFFICIENT_AMOUNT();
 
-    if (_shouldSettle) _settle(_collection, _itemId, msg.value, _beneficiary);
+    // The amount must fit in a uint88.
+    if (_amount > type(uint88).max) revert INVALID_AMOUNT();
+
+    // Get a reference to the number of decimals in the token that the sale should be accepted in.
+    uint256 _minPriceDecimals = uint256(uint8(_packedMinPrice >> 248));
+
+    if (_shouldSettle)
+      _settle(_collection, _itemId, _amount, _minPriceToken, _minPriceDecimals, _beneficiary);
     else {
+      // amount is bits 0-87.
+      uint256 _packedPendingSettlementAmount = uint88(_amount);
+      // amount token in bits 88-247.
+      _packedPendingSettlementAmount |= uint256(uint160(_minPriceToken)) << 88;
+      // amount decimals in bits 248-255.
+      _packedPendingSettlementAmount |= uint256(uint160(_minPriceDecimals)) << 248;
       // Set the amount to be settled as a result of the purchase.
-      pendingSettleAmount[_collection][_itemId] = msg.value;
+      pendingSettleAmount[_collection][_itemId] = _packedPendingSettlementAmount;
 
-      // Set the owner to whom the benenficiary of the sale.
+      // Set the benenficiary of the sale.
       ownerOfPendingSettlement[_collection][_itemId] = _beneficiary;
     }
 
     // Transfer the item.
-    _collection.safeTransferFrom(address(this), _beneficiary, _itemId);
+    _collection.safeTransferFrom(_collection.ownerOf(_itemId), _beneficiary, _itemId);
 
     emit Buy(_collection, _itemId, _beneficiary, msg.value, _memo, msg.sender);
   }
@@ -229,17 +287,26 @@ contract JBMarket is IJBMarket, Ownable, ReentrancyGuard {
     @param _itemId The ID of the sold item whose purchase is being settled.
   */
   function settle(IERC721 _collection, uint256 _itemId) external override nonReentrant {
-    // Get the amount to settle.
-    uint256 _amount = pendingSettleAmount[_collection][_itemId];
+    // Get a reference to the packed min price.
+    uint256 _packedPendingSettleAmount = pendingSettleAmount[_collection][_itemId];
 
-    // Get the beneficiary of any leftover amount once splits are settled.
-    address _leftoverBeneficiary = ownerOfPendingSettlement[_collection][_itemId];
+    // Get a reference to the pending settle amount price.
+    uint256 _amount = uint256(uint88(_packedPendingSettleAmount));
 
     // Can't settle if there's nothing to settle.
     if (_amount == 0) revert NOTHING_TO_SETTLE();
 
+    // Get a reference to the token that the settle amount is in.
+    address _amountToken = address(uint160(_packedPendingSettleAmount >> 88));
+
+    // Get a reference to the number of decimals in the pending settle amount.
+    uint256 _amountDecimals = uint256(uint8(_packedPendingSettleAmount >> 248));
+
+    // Get the beneficiary of any leftover amount once splits are settled.
+    address _leftoverBeneficiary = ownerOfPendingSettlement[_collection][_itemId];
+
     // Settle.
-    _settle(_collection, _itemId, _amount, _leftoverBeneficiary);
+    _settle(_collection, _itemId, _amount, _amountToken, _amountDecimals, _leftoverBeneficiary);
 
     // Reset the pending settlement amount for the item now that it's been settled.
     pendingSettleAmount[_collection][_itemId] = 0;
@@ -302,99 +369,33 @@ contract JBMarket is IJBMarket, Ownable, ReentrancyGuard {
     @param _collection The collection from which a sale is being settled.
     @param _itemId The ID of the sold item whose purchase is being settled.
     @param _amount The amount to settle. 
+    @param _token The token being used to settle.
+    @param _decimals The number of decimals in the token being used to settle.
     @param _leftoverBeneficiary The address who should be the benficiary of any leftover amount once split's are settled. 
   */
   function _settle(
     IERC721 _collection,
     uint256 _itemId,
     uint256 _amount,
+    address _token,
+    uint256 _decimals,
     address _leftoverBeneficiary
   ) private {
     // Get the fee amount;
     uint256 _fee = fee == 0 ? 0 : _feeAmount(_amount);
 
-    // Set the leftover amount to the initial amount minus the fee.
-    uint256 _leftoverAmount = _amount - _fee;
-
-    // Get a reference to the item's settlement splits.
-    JBSplit[] memory _splits = splitsStore.splitsOf(
+    // Pay to the splits.
+    uint256 _leftoverAmount = _payToSplits(
       projectId,
       uint256(uint160(address(_collection))),
-      _itemId
+      _itemId,
+      _token,
+      _amount - _fee,
+      _decimals
     );
 
-    // Settle between all splits.
-    for (uint256 i = 0; i < _splits.length; i++) {
-      // Get a reference to the split being iterated on.
-      JBSplit memory _split = _splits[i];
-
-      // The amount to send towards the split.
-      uint256 _settleAmount = PRBMath.mulDiv(
-        _amount,
-        _split.percent,
-        JBConstants.SPLITS_TOTAL_PERCENT
-      );
-
-      if (_settleAmount > 0) {
-        // Transfer tokens to the mod.
-        // If there's an allocator set, transfer to its `allocate` function.
-        if (_split.allocator != IJBSplitAllocator(address(0))) {
-          // Create the data to send to the allocator.
-          JBSplitAllocationData memory _data = JBSplitAllocationData(
-            _settleAmount,
-            18,
-            projectId,
-            _itemId,
-            _split
-          );
-          // Trigger the allocator's `allocate` function.
-          _split.allocator.allocate{value: _settleAmount}(_data);
-          // Otherwise, if a project is specified, make a payment to it.
-        } else if (_split.projectId != 0) {
-          // Find the terminal for this contract's project.
-          IJBPaymentTerminal _terminal = directory.primaryTerminalOf(
-            _split.projectId,
-            JBTokens.ETH
-          );
-
-          // There must be a terminal.
-          if (_terminal == IJBPaymentTerminal(address(0))) revert TERMINAL_NOT_FOUND();
-
-          // Pay if there's a beneficiary to receive tokens.
-          if (_split.beneficiary != address(0))
-            // Send funds to the terminal.
-            _terminal.pay{value: _settleAmount}(
-              0, // ignored.
-              _split.projectId,
-              _split.beneficiary,
-              0,
-              _split.preferClaimed,
-              '',
-              bytes('')
-            );
-            // Otherwise just add to balance so tokens don't get issued.
-          else
-            _terminal.addToBalanceOf{value: _settleAmount}(
-              _split.projectId,
-              0, // ignored
-              ''
-            );
-        } else {
-          // If there's a beneficiary, send the funds directly to the beneficiary. Otherwise send to the msg.sender.
-          Address.sendValue(
-            _split.beneficiary != address(0) ? _split.beneficiary : payable(msg.sender),
-            _settleAmount
-          );
-        }
-        // Subtract from the amount to be sent to the beneficiary.
-        _leftoverAmount = _leftoverAmount - _settleAmount;
-      }
-
-      emit SettleToSplit(_collection, _itemId, _split, _settleAmount, msg.sender);
-    }
-
     // Take the fee.
-    if (_fee > 0) _takeFee(_fee, _leftoverBeneficiary);
+    if (_fee > 0) _takeFee(_fee, _token, _leftoverBeneficiary);
 
     // Send any leftover amount to the owner to who received the purchased item.
     if (_leftoverAmount > 0) Address.sendValue(payable(_leftoverBeneficiary), _leftoverAmount);
@@ -404,13 +405,18 @@ contract JBMarket is IJBMarket, Ownable, ReentrancyGuard {
 
   /**
     @notice
-    Takes a fee into the platform's project, which has an id of _PROTOCOL_PROJECT_ID.
+    Takes a fee into the specified project.
 
     @param _fee The amount of the fee to take, as a floating point number with 18 decimals.
+    @param _token The token the fee is being paid in.
     @param _beneficiary The address to mint the platforms tokens for.
   */
-  function _takeFee(uint256 _fee, address _beneficiary) private {
-    _processFee(_fee, _beneficiary); // Take the fee.
+  function _takeFee(
+    uint256 _fee,
+    address _token,
+    address _beneficiary
+  ) private {
+    _processFee(_fee, _token, _beneficiary); // Take the fee.
   }
 
   /** 
@@ -431,14 +437,28 @@ contract JBMarket is IJBMarket, Ownable, ReentrancyGuard {
     Process a fee of the specified amount.
 
     @param _amount The fee amount, as a floating point number with 18 decimals.
+    @param _token The token the fee is being paid in.
     @param _beneficiary The address to mint the platform's tokens for.
   */
 
-  function _processFee(uint256 _amount, address _beneficiary) private {
+  function _processFee(
+    uint256 _amount,
+    address _token,
+    address _beneficiary
+  ) private {
     // Get the terminal for the protocol project.
     IJBPaymentTerminal _terminal = directory.primaryTerminalOf(projectId, JBTokens.ETH);
 
     // Send the payment.
-    _terminal.pay{value: _amount}(_amount, projectId, _beneficiary, 0, false, '', bytes('')); // Use the external pay call of the correct terminal.
+    _terminal.pay{value: _amount}(
+      projectId,
+      _amount,
+      _token,
+      _beneficiary,
+      0,
+      false,
+      '',
+      bytes('')
+    ); // Use the external pay call of the correct terminal.
   }
 }

@@ -11,6 +11,8 @@ interface IJBMarket {
     uint256 indexed itemId,
     JBSplit[] splits,
     uint256 minPrice,
+    address minPriceToken,
+    uint256 minPriceDecimals,
     string memo,
     address caller
   );
@@ -43,10 +45,6 @@ interface IJBMarket {
 
   event SetFee(uint256 fee, address caller);
 
-  function splitsStore() external view returns (IJBSplitsStore);
-
-  function directory() external view returns (IJBDirectory);
-
   function minPrice(IERC721 _collection, uint256 _itemId) external returns (uint256);
 
   function pendingSettleAmount(IERC721 _collection, uint256 _itemId) external returns (uint256);
@@ -68,6 +66,7 @@ interface IJBMarket {
   function buy(
     IERC721 _collection,
     uint256 _itemId,
+    uint256 _amount,
     address _beneficiary,
     bool _shouldSettle,
     string calldata _memo
