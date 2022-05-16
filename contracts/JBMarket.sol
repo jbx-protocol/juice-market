@@ -160,12 +160,6 @@ contract JBMarket is IJBMarket, JBETHERC20SplitsPayer {
       // The amount must fit in a uint88.
       if (_itemMinPrice > type(uint88).max) revert INVALID_AMOUNT();
 
-      // The token that should be accepted for the sale.
-      address _itemMinPriceToken = _items[_i].minPriceToken;
-
-      // The number of decimals in the token that should be accepted.
-      uint256 _itemMinPriceDecimals = uint256(_items[_i].minPriceDecimals);
-
       // The address doing the listing must be owner or approved to manage this collection item.
       if (
         _collection.ownerOf(_itemId) != msg.sender &&
@@ -179,31 +173,20 @@ contract JBMarket is IJBMarket, JBETHERC20SplitsPayer {
         !_collection.isApprovedForAll(_collection.ownerOf(_itemId), address(this))
       ) revert MARKET_LACKS_UNAUTHORIZATION();
 
-      {
-        // min price is bits 0-87.
-        uint256 _packedMinPrice = uint88(_items[_i].minPrice);
-        // min price token in bits 88-247.
-        _packedMinPrice |= uint256(uint160(_items[_i].minPriceToken)) << 88;
-        // min price decimals in bits 248-255.
-        _packedMinPrice |= uint256(uint160(_items[_i].minPriceDecimals)) << 248;
-        // Store the minimum price, token, and num decimals that the item should be sold at.
-        minPrice[_collection][_itemId] = _packedMinPrice;
-      }
-
-      emit List(
-        _collection,
-        _itemId,
-        _splitGroup,
-        _itemMinPrice,
-        _itemMinPriceToken,
-        _itemMinPriceDecimals,
-        _memo,
-        msg.sender
-      );
+      // min price is bits 0-87.
+      uint256 _packedMinPrice = uint88(_items[_i].minPrice);
+      // min price token in bits 88-247.
+      _packedMinPrice |= uint256(uint160(_items[_i].minPriceToken)) << 88;
+      // min price decimals in bits 248-255.
+      _packedMinPrice |= uint256(uint160(_items[_i].minPriceDecimals)) << 248;
+      // Store the minimum price, token, and num decimals that the item should be sold at.
+      minPrice[_collection][_itemId] = _packedMinPrice;
     }
 
     // Set the splits in the store for the collection
     splitsStore.set(projectId, uint256(uint160(address(_collection))), 0, _splitGroup);
+
+    emit List(_collection, _items, _splitGroup, _memo, msg.sender);
   }
 
   /** 

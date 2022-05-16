@@ -8,11 +8,8 @@ import '../structs/JBCollectionItem.sol';
 interface IJBMarket {
   event List(
     IERC721 indexed collection,
-    uint256 indexed itemId,
+    JBMarketCollectionItem[] items,
     JBSplit[] splits,
-    uint256 minPrice,
-    address minPriceToken,
-    uint256 minPriceDecimals,
     string memo,
     address caller
   );
