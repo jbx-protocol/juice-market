@@ -61,7 +61,7 @@ interface IJBMarket {
     IERC721 _collection,
     JBMarketCollectionItem[] calldata _items,
     JBSplit[] calldata _splitGroup,
-    string calldata _memo
+    string memory _memo
   ) external;
 
   function buy(

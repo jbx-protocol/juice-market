@@ -138,7 +138,7 @@ contract JBMarket is IJBMarket, JBETHERC20SplitsPayer {
     IERC721 _collection,
     JBMarketCollectionItem[] calldata _items,
     JBSplit[] calldata _splitGroup,
-    string calldata _memo
+    string memory _memo
   ) external override nonReentrant {
     // The collection must exist.
     if (_collection == IERC721(address(0))) revert UNKOWN_COLLECTION();
