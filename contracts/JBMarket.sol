@@ -65,6 +65,17 @@ contract JBMarket is IJBMarket, JBETHERC20SplitsPayer {
 
   /**
     @notice
+    A contract used the resolve the price of an item in a collection.
+
+    @dev
+    If a resolver exists for a collection, it'll override the `minPrice`.
+
+    _collection The collection to which the resolver applies.
+  */
+  mapping(IERC721 => IJBMarketPriceResolver) public override priceResolver;
+
+  /**
+    @notice
     The pending purchase amount to settle once an item has been bought.
 
     _collection The collection to which the item belongs whose purchase settlement is pending.
@@ -131,12 +142,14 @@ contract JBMarket is IJBMarket, JBETHERC20SplitsPayer {
 
     @param _collection The collection from which items are being listed.
     @param _items The items being listed. The amount must fit in a uint88.
+    @param _priceResolver A contract used the resolve the price of an item in a collection.
     @param _splitGroup The group of splits between which the item sales will be sent.
     @param _memo A memo to pass along to the emitted event.
   **/
   function list(
     IERC721 _collection,
     JBMarketCollectionItem[] calldata _items,
+    IJBMarketPriceResolver _priceResolver,
     JBSplit[] calldata _splitGroup,
     string memory _memo
   ) external override nonReentrant {
@@ -149,16 +162,14 @@ contract JBMarket is IJBMarket, JBETHERC20SplitsPayer {
     // Get a reference to the number of items.
     uint256 _numItems = _items.length;
 
+    // Set the price resolver if one was provided.
+    if (_priceResolver != IJBMarketPriceResolver(address(0)))
+      priceResolver[_collection] = _priceResolver;
+
     // List each collection item.
     for (uint256 _i; _i < _numItems; _i++) {
       // The ID of the collection item.
       uint256 _itemId = _items[_i].id;
-
-      // The minimum price the piece should be sold for.
-      uint256 _itemMinPrice = _items[_i].minPrice;
-
-      // The amount must fit in a uint88.
-      if (_itemMinPrice > type(uint88).max) revert INVALID_AMOUNT();
 
       // The address doing the listing must be owner or approved to manage this collection item.
       if (
@@ -173,14 +184,23 @@ contract JBMarket is IJBMarket, JBETHERC20SplitsPayer {
         !_collection.isApprovedForAll(_collection.ownerOf(_itemId), address(this))
       ) revert MARKET_LACKS_UNAUTHORIZATION();
 
-      // min price is bits 0-87.
-      uint256 _packedMinPrice = uint88(_items[_i].minPrice);
-      // min price token in bits 88-247.
-      _packedMinPrice |= uint256(uint160(_items[_i].minPriceToken)) << 88;
-      // min price decimals in bits 248-255.
-      _packedMinPrice |= uint256(uint160(_items[_i].minPriceDecimals)) << 248;
-      // Store the minimum price, token, and num decimals that the item should be sold at.
-      minPrice[_collection][_itemId] = _packedMinPrice;
+      if (_priceResolver == IJBMarketPriceResolver(address(0))) {
+        // The minimum price the piece should be sold for.
+        uint256 _itemMinPrice = _items[_i].minPrice;
+
+        // The amount must fit in a uint88.
+        if (_itemMinPrice > type(uint88).max) revert INVALID_AMOUNT();
+
+        // min price is bits 0-87.
+        uint256 _packedMinPrice = uint88(_items[_i].minPrice);
+        // min price token in bits 88-247.
+        _packedMinPrice |= uint256(uint160(_items[_i].minPriceToken)) << 88;
+        // min price decimals in bits 248-255.
+        _packedMinPrice |= uint256(uint160(_items[_i].minPriceDecimals)) << 248;
+        // Store the minimum price, token, and num decimals that the item should be sold at.
+        minPrice[_collection][_itemId] = _packedMinPrice;
+        // Reset the min price for the item if needed if a price resolver was specified.
+      } else if (minPrice[_collection][_itemId] > 0) minPrice[_collection][_itemId] = 0;
     }
 
     // Set the splits in the store for the collection
@@ -211,11 +231,19 @@ contract JBMarket is IJBMarket, JBETHERC20SplitsPayer {
     // Get a reference to the packed min price.
     uint256 _packedMinPrice = minPrice[_collection][_itemId];
 
-    // Get a reference to the minimum price that should be accepted.
-    uint256 _minPrice = uint256(uint88(_packedMinPrice));
+    // Get a reference to the minimum price that should be accepted, the token that the sale should be accepted in, and the number of decimals in the token that the sale should be accepted in.
+    (uint256 _minPrice, address _minPriceToken, uint256 _minPriceDecimals) = _packedMinPrice == 0
+      ? (
+        uint256(uint88(_packedMinPrice)),
+        address(uint160(_packedMinPrice >> 88)),
+        uint256(uint8(_packedMinPrice >> 248))
+      )
+      : priceResolver[_collection] != IJBMarketPriceResolver(address(0))
+      ? priceResolver[_collection].priceFor(_collection, _itemId, msg.sender, _beneficiary)
+      : (0, address(0), 0);
 
-    // Get a reference to the token that the sale should be accepted in.
-    address _minPriceToken = address(uint160(_packedMinPrice >> 88));
+    // Can't buy if there's no price.
+    if (_minPrice == 0) revert NOT_LISTED();
 
     // ETH shouldn't be sent to this contract if the sale token isn't ETH.
     if (_minPriceToken != JBTokens.ETH) {
@@ -227,17 +255,11 @@ contract JBMarket is IJBMarket, JBETHERC20SplitsPayer {
     // If the sale token is ETH, override _amount with msg.value.
     else _amount = msg.value;
 
-    // Can't buy if there's no price.
-    if (_minPrice == 0) revert NOT_LISTED();
-
     // Can't buy if sent amount is less than the minimum.
     if (_minPrice > _amount) revert INSUFFICIENT_AMOUNT();
 
     // The amount must fit in a uint88.
     if (_amount > type(uint88).max) revert INVALID_AMOUNT();
-
-    // Get a reference to the number of decimals in the token that the sale should be accepted in.
-    uint256 _minPriceDecimals = uint256(uint8(_packedMinPrice >> 248));
 
     if (_shouldSettle)
       _settle(_collection, _itemId, _amount, _minPriceToken, _minPriceDecimals, _beneficiary);
@@ -306,7 +328,10 @@ contract JBMarket is IJBMarket, JBETHERC20SplitsPayer {
   */
   function delist(IERC721 _collection, uint256 _itemId) external override nonReentrant {
     // Make sure the item isn't already listed.
-    if (minPrice[_collection][_itemId] == 0) revert NOT_LISTED();
+    if (
+      minPrice[_collection][_itemId] == 0 &&
+      priceResolver[_collection] == IJBMarketPriceResolver(address(0))
+    ) revert NOT_LISTED();
 
     // The address doing the delisting must be owner or approved to manage this collection item.
     if (
@@ -316,7 +341,11 @@ contract JBMarket is IJBMarket, JBETHERC20SplitsPayer {
     ) revert UNAUTHORIZED();
 
     // Set the price to 0.
-    minPrice[_collection][_itemId] = 0;
+    if (minPrice[_collection][_itemId] > 0) minPrice[_collection][_itemId] = 0;
+
+    // Set the resolver to the zero address.
+    if (priceResolver[_collection] != IJBMarketPriceResolver(address(0)))
+      priceResolver[_collection] = IJBMarketPriceResolver(address(0));
 
     emit Delist(_collection, _itemId, msg.sender);
   }
