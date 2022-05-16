@@ -402,7 +402,8 @@ contract JBMarket is IJBMarket, JBETHERC20SplitsPayer {
       0,
       _token,
       _amount - _fee,
-      _decimals
+      _decimals,
+      _leftoverBeneficiary
     );
 
     // Take the fee.
