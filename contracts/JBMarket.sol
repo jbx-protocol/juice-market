@@ -142,7 +142,7 @@ contract JBMarket is IJBMarket, JBETHERC20SplitsPayer {
 
     @param _collection The collection from which items are being listed.
     @param _items The items being listed. The amount must fit in a uint88.
-    @param _priceResolver A contract used the resolve the price of an item in a collection.
+    @param _priceResolver A contract used the resolve the price of an item in a collection. This will override any individually specified item prices. 
     @param _splitGroup The group of splits between which the item sales will be sent.
     @param _memo A memo to pass along to the emitted event.
   **/
