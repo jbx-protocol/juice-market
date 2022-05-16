@@ -60,6 +60,7 @@ interface IJBMarket {
   function list(
     IERC721 _collection,
     JBMarketCollectionItem[] calldata _items,
+    JBSplit[] calldata _splitGroup,
     string calldata _memo
   ) external;
 

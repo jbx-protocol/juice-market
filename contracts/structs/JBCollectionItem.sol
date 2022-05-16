@@ -8,5 +8,4 @@ struct JBMarketCollectionItem {
   uint256 minPrice;
   address minPriceToken;
   uint256 minPriceDecimals;
-  JBSplit[] splits;
 }

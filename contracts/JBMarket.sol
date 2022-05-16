@@ -127,15 +127,17 @@ contract JBMarket is IJBMarket, JBETHERC20SplitsPayer {
 
   /**
     @notice 
-    List an item.
+    List collection items each with unique split groups.
 
     @param _collection The collection from which items are being listed.
     @param _items The items being listed. The amount must fit in a uint88.
+    @param _splitGroup The group of splits between which the item sales will be sent.
     @param _memo A memo to pass along to the emitted event.
-   **/
+  **/
   function list(
     IERC721 _collection,
     JBMarketCollectionItem[] calldata _items,
+    JBSplit[] calldata _splitGroup,
     string calldata _memo
   ) external override nonReentrant {
     // The collection must exist.
@@ -164,9 +166,6 @@ contract JBMarket is IJBMarket, JBETHERC20SplitsPayer {
       // The number of decimals in the token that should be accepted.
       uint256 _itemMinPriceDecimals = uint256(_items[_i].minPriceDecimals);
 
-      // The splits to whom the sale funds should be routable to.
-      JBSplit[] memory _splits = _items[_i].splits;
-
       // The address doing the listing must be owner or approved to manage this collection item.
       if (
         _collection.ownerOf(_itemId) != msg.sender &&
@@ -179,9 +178,6 @@ contract JBMarket is IJBMarket, JBETHERC20SplitsPayer {
         _collection.getApproved(_itemId) != address(this) &&
         !_collection.isApprovedForAll(_collection.ownerOf(_itemId), address(this))
       ) revert MARKET_LACKS_UNAUTHORIZATION();
-
-      // Set the splits in the store.
-      splitsStore.set(projectId, uint256(uint160(address(_collection))), _itemId, _splits);
 
       {
         // min price is bits 0-87.
@@ -197,7 +193,7 @@ contract JBMarket is IJBMarket, JBETHERC20SplitsPayer {
       emit List(
         _collection,
         _itemId,
-        _splits,
+        _splitGroup,
         _itemMinPrice,
         _itemMinPriceToken,
         _itemMinPriceDecimals,
@@ -205,6 +201,9 @@ contract JBMarket is IJBMarket, JBETHERC20SplitsPayer {
         msg.sender
       );
     }
+
+    // Set the splits in the store for the collection
+    splitsStore.set(projectId, uint256(uint160(address(_collection))), 0, _splitGroup);
   }
 
   /** 
@@ -388,7 +387,7 @@ contract JBMarket is IJBMarket, JBETHERC20SplitsPayer {
     uint256 _leftoverAmount = _payToSplits(
       projectId,
       uint256(uint160(address(_collection))),
-      _itemId,
+      0,
       _token,
       _amount - _fee,
       _decimals
