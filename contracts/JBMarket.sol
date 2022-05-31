@@ -203,8 +203,12 @@ contract JBMarket is IJBMarket, JBETHERC20SplitsPayer {
       } else if (minPrice[_collection][_itemId] > 0) minPrice[_collection][_itemId] = 0;
     }
 
+    // Create the grouped splits.
+    JBGroupedSplits[] memory _groupedSplits = new JBGroupedSplits[](1);
+    _groupedSplits[1] = JBGroupedSplits(0, _splitGroup);
+
     // Set the splits in the store for the collection
-    splitsStore.set(projectId, uint256(uint160(address(_collection))), 0, _splitGroup);
+    splitsStore.set(projectId, uint256(uint160(address(_collection))), _groupedSplits);
 
     emit List(_collection, _items, _splitGroup, _memo, msg.sender);
   }
