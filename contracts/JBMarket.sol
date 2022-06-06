@@ -236,7 +236,7 @@ contract JBMarket is IJBMarket, JBETHERC20SplitsPayer {
     uint256 _packedMinPrice = minPrice[_collection][_itemId];
 
     // Get a reference to the minimum price that should be accepted, the token that the sale should be accepted in, and the number of decimals in the token that the sale should be accepted in.
-    (uint256 _minPrice, address _minPriceToken, uint256 _minPriceDecimals) = _packedMinPrice == 0
+    (uint256 _minPrice, address _minPriceToken, uint256 _minPriceDecimals) = _packedMinPrice != 0
       ? (
         uint256(uint88(_packedMinPrice)),
         address(uint160(_packedMinPrice >> 88)),
